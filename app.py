@@ -1,47 +1,41 @@
-from fastapi import FastAPI, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
-from model import EventRecommender
-import os
+from typing import List
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 
-API_KEY = os.getenv("API_KEY", "test123")  # fallback for local testing
+app = FastAPI(title="Event Recommendation API")
 
-app = FastAPI(title="Smart Event Recommendation API")
+# Load dataset
+events_df = pd.read_csv("model/events.csv")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Combine text features
+events_df["combined"] = (
+    events_df["Event_Name"].fillna("") + " " +
+    events_df["Tags"].fillna("") + " " +
+    events_df["Domain"].fillna("")
 )
 
-recommender = EventRecommender()
+# Vectorize
+vectorizer = TfidfVectorizer(stop_words="english")
+tfidf_matrix = vectorizer.fit_transform(events_df["combined"])
 
-class UserModel(BaseModel):
-    domain: str
-    areas_of_interest: List[str]
-
-class EventModel(BaseModel):
-    event_name: str
-    tags: Optional[List[str]] = []
-    skills: Optional[List[str]] = []
-
-class RecommendationRequest(BaseModel):
-    user: UserModel
-    events: List[EventModel]
+class UserData(BaseModel):
+    interests: List[str]
+    domain: List[str]
 
 @app.post("/recommend")
-def recommend_events(request: RecommendationRequest, x_api_key: str = Header(None)):
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API Key")
+async def recommend_events(data: UserData):
+    try:
+        user_text = " ".join(data.interests + data.domain)
+        user_vec = vectorizer.transform([user_text])
+        similarity = cosine_similarity(user_vec, tfidf_matrix)
+        top_indices = np.argsort(similarity[0])[::-1][:5]
 
-    user = request.user.dict()
-    events = [event.dict() for event in request.events]
-    recommendations = recommender.recommend_events(user, events, top_n=5)
-    return {"recommendations": recommendations}
+        recommended = events_df.iloc[top_indices][["Event_Name", "Tags", "Domain"]].to_dict(orient="records")
+        return {"recommended_events": recommended}
 
-@app.get("/")
-def home():
-    return {"message": "Smart Event Recommendation API running"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
